@@ -5,8 +5,8 @@
 // =====================================
 // WIFI SETTINGS
 // =====================================
-const char* ssid     = "Superbox_Wifi_2530";
-const char* password = "83KH4B77Y8";
+const char* ssid     = "your wifi name";
+const char* password = "your password";
 
 const char* CAM_ID = "cam2";
 
