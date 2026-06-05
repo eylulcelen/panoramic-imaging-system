@@ -5,11 +5,10 @@
 | Name | Department |
 |------|-----------|
 | Ece Bezirci | Electrical & Electronics Engineering · Software Engineering |
-| Eren Gülge | Electrical & Electronics Engineering |
 | Eylül Çelen | Computer Engineering · Software Engineering |
 | Onur Sinan Güler | Computer Engineering · Software Engineering |
 
-**Advisors:** Assist. Prof. Duygu Çakır · Assist. Prof. Tarkan Aydın · Assoc. Dr. Ömer Polat
+**Advisors:** Assist. Prof. Duygu Çakır · Assist. Prof. Tarkan Aydın
 
 ---
 
