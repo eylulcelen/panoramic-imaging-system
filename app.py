@@ -639,7 +639,7 @@ def api_capture():
 
     # 2. stitch
     try:
-        stitch_images(out_path=out_path, method=method)
+        stitch_images(input_images=["cam1.jpg", "cam2.jpg"], out_path=out_path)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
