@@ -1,15 +1,19 @@
 import cv2 as cv
 import numpy as np
 
+use_high_level_api = False
+
 # Configuration
 # TODO: seperate the config
+
+PARAMS_FILE = 'params.npz'          # None or path – skips setup() entirely and loads saved params instead
 
 WORK_MEGAPIX            = 0.6
 SEAM_MEGAPIX            = 0.1
 COMPOSE_MEGAPIX         = -1         # -1 = original resolution
 
 FEATURES                = 'orb'      # orb | sift | brisk | akaze
-MATCH_CONF              = None       # None → 0.3 for orb, 0.65 otherwise
+MATCH_CONF              = 0.5       # None → 0.3 for orb, 0.65 otherwise
 CONF_THRESH             = 1.0
 
 MATCHER                 = 'homography'   # homography | affine
@@ -145,10 +149,6 @@ def setup(input_images):
     pairwise = matcher.apply2(features)
     matcher.collectGarbage()
 
-    if SAVE_GRAPH:
-        with open(SAVE_GRAPH, 'w', encoding='UTF-8') as fh:
-            fh.write(cv.detail.matchesGraphAsString(input_images, pairwise, CONF_THRESH))
-
     # Filter to largest connected component; modifies features/pairwise in-place
     indices       = cv.detail.leaveBiggestComponent(features, pairwise, CONF_THRESH)
     img_names_sub = [input_images[i]      for i in indices]
@@ -203,6 +203,49 @@ def setup(input_images):
         'seam_work_aspect':   seam_work_aspect,
     }
 
+
+def max_rect_in_hist(heights):
+    """Largest rectangle in a histogram via monotone stack. O(n).
+    Returns (area, left_col, right_col, bar_height)."""
+    stack = []  # (start_col, bar_height)
+    best_area = 0
+    best = (0, len(heights), 0)
+
+    for i in range(len(heights) + 1):
+        h = heights[i] if i < len(heights) else 0
+        left = i
+        while stack and stack[-1][1] > h:
+            sl, sh = stack.pop()
+            area = sh * (i - sl)
+            if area > best_area:
+                best_area = area
+                best = (sl, i, sh)
+            left = sl
+        stack.append((left, h))
+
+    return best_area, best[0], best[1], best[2]
+
+def crop_black_borders(img):
+    """Crop to the largest inscribed rectangle free of black borders."""
+    # int16 blender output has pixel values in [0, 255]; clip safely to uint8
+    tmp = np.clip(img, 0, 255).astype(np.uint8)
+    gray = cv.cvtColor(tmp, cv.COLOR_BGR2GRAY) if tmp.ndim == 3 else tmp
+    _, mask = cv.threshold(gray, 1, 1, cv.THRESH_BINARY)
+
+    rows, cols = mask.shape
+    heights = np.zeros(cols, dtype=np.int32)
+    best_area = 0
+    best = (0, 0, cols, rows)  # x1, y1, x2, y2
+
+    for r in range(rows):
+        heights = np.where(mask[r] == 1, heights + 1, 0)
+        area, x1, x2, h = max_rect_in_hist(heights)
+        if area > best_area:
+            best_area = area
+            best = (x1, r - h + 1, x2, r + 1)
+
+    x1, y1, x2, y2 = best
+    return img[y1:y2, x1:x2]
 
 # Phase 2 – Stitch
 # Warp → exposure compensation → seam finding → composite → blend → write.
@@ -308,12 +351,88 @@ def stitch(data, out_path):
         blender.feed(cv.UMat(img_warped_s), mask_warped, corners[idx])
 
     result, _ = blender.blend(None, None)
-    cv.imwrite(out_path, result)
+    return result;
 
 
-def stitch_images(input_images, out_path):
-    parameters = setup(input_images)
-    stitch(parameters, out_path)
+def save_params(data, path):
+    """Serialize camera parameters returned by setup() to a .npz file."""
+    cameras = data['cameras']
+    d = {
+        'img_names':          np.array(data['img_names']),
+        'full_img_sizes':     np.array(data['full_img_sizes']),
+        'warped_image_scale': np.float64(data['warped_image_scale']),
+        'work_scale':         np.float64(data['work_scale']),
+        'seam_work_aspect':   np.float64(data['seam_work_aspect']),
+        'focal':  np.array([c.focal  for c in cameras]),
+        'ppx':    np.array([c.ppx    for c in cameras]),
+        'ppy':    np.array([c.ppy    for c in cameras]),
+        'aspect': np.array([c.aspect for c in cameras]),
+    }
+    for i, cam in enumerate(cameras):
+        d[f'R_{i}'] = cam.R
+        d[f't_{i}'] = cam.t
+    np.savez(path, **d)
+
+
+def load_params(path):
+    """Reconstruct a setup() result dict from a saved .npz file."""
+    d = np.load(path)
+    img_names = [str(s) for s in d['img_names']]
+    n = len(img_names)
+
+    cameras = []
+    for i in range(n):
+        cam        = cv.detail.CameraParams()
+        cam.focal  = float(d['focal'][i])
+        cam.ppx    = float(d['ppx'][i])
+        cam.ppy    = float(d['ppy'][i])
+        cam.aspect = float(d['aspect'][i])
+        cam.R      = d[f'R_{i}'].astype(np.float32)
+        cam.t      = d[f't_{i}']
+        cameras.append(cam)
+
+    work_scale       = float(d['work_scale'])
+    seam_work_aspect = float(d['seam_work_aspect'])
+    seam_scale       = seam_work_aspect * work_scale
+
+    seam_images = []
+    for name in img_names:
+        full = cv.imread(name)
+        if full is None:
+            raise Exception(f"Cannot read image: {name}")
+        seam_images.append(cv.resize(full, None, fx=seam_scale, fy=seam_scale,
+                                     interpolation=cv.INTER_LINEAR_EXACT))
+
+    return {
+        'cameras':            cameras,
+        'seam_images':        seam_images,
+        'img_names':          img_names,
+        'full_img_sizes':     [tuple(int(v) for v in row) for row in d['full_img_sizes']],
+        'warped_image_scale': float(d['warped_image_scale']),
+        'work_scale':         work_scale,
+        'seam_work_aspect':   seam_work_aspect,
+    }
+
+
+def stitch_images(input_images, out_path, save_parameters = False):
+    if use_high_level_api:
+        stitcher = cv.Stitcher.create(cv.STITCHER_PANORAMA)
+        imgs = []
+        for img_name in input_images:
+            img = cv.imread(cv.samples.findFile(img_name))
+            if img is None:
+                raise Exception("can't read image " + img_name)
+            imgs.append(img)
+        status, pano = stitcher.stitch(imgs)
+        cv.imwrite(out_path, crop_black_borders(pano))
+    else:
+        if not save_parameters:
+            parameters = load_params(PARAMS_FILE)
+        else:
+            parameters = setup(input_images)
+            if save_parameters:
+                save_params(parameters, PARAMS_FILE)
+        cv.imwrite(out_path, crop_black_borders(stitch(parameters, out_path)))
 
 
 # Test

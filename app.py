@@ -18,7 +18,7 @@ from flask import (Flask, render_template_string, send_file,
 from database import (init_db, verify_user, create_user, get_all_users,
                       delete_user, save_capture, get_user_captures,
                       delete_capture, get_conn)
-from sync   import sync_capture, check_camera_status
+from sync   import sync_capture, check_camera_status, set_resolution
 from stitch import stitch_images
 
 # ── app config ───────────────────────────────────────────────────────────────
@@ -130,13 +130,26 @@ CSS = """
   .refresh-btn:hover { background: #f0ede4; }
 
   /* settings grid */
-  .settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 2rem; }
+  .settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 1rem; }
   .setting-card  { background: #fff; border: 0.5px solid #e0ddd4; border-radius: 10px; padding: 12px 14px; }
   .setting-card label { display: block; font-size: 10.5px; letter-spacing: 0.1em;
                         text-transform: uppercase; color: #b0ad9f; margin-bottom: 6px; }
   .setting-card select { width: 100%; font-size: 13px; color: #1a1a18;
                          background: transparent; border: none; outline: none;
                          cursor: pointer; font-family: inherit; }
+
+  /* save params row */
+  .save-params-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 2rem; padding: 0 2px;
+  }
+  .save-params-row input[type="checkbox"] {
+    width: 14px; height: 14px; cursor: pointer; accent-color: #1a1a18; flex-shrink: 0;
+  }
+  .save-params-row label {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #b0ad9f; cursor: pointer; user-select: none;
+  }
 
   /* capture card */
   .capture-card {
@@ -425,28 +438,20 @@ MAIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   <div class="settings-grid">
     <div class="setting-card">
       <label for="sel-res">Resolution</label>
-      <select id="sel-res">
-        <option value="UXGA">1600 × 1200 (UXGA)</option>
-        <option value="SXGA">1280 × 1024 (SXGA)</option>
-        <option value="SVGA">800 × 600 (SVGA)</option>
+      <select id="sel-res" onchange="setResolution(this.value)">
+        <option value="11">800 × 600 (SVGA)</option>
+        <option value="10">640 × 480 (VGA)</option>
+        <option value="9">480 × 320 (HVGA)</option>
       </select>
     </div>
-    <div class="setting-card">
-      <label for="sel-qual">JPEG quality</label>
-      <select id="sel-qual">
-        <option value="high">High</option>
-        <option value="medium">Medium</option>
-        <option value="low">Low</option>
-      </select>
-    </div>
-    <div class="setting-card">
-      <label for="sel-method">Stitch method</label>
-      <select id="sel-method">
-        <option value="SIFT">SIFT — accurate</option>
-        <option value="ORB">ORB — fast</option>
-      </select>
-    </div>
+          <!-- Save parameters checkbox -->
+      <div class="save-params-row">
+        <input type="checkbox" id="chk-save-params">
+        <label for="chk-save-params">Save stitch parameters</label>
+      </div>
   </div>
+
+
 
   <!-- Capture -->
   <span class="lbl">capture</span>
@@ -486,6 +491,15 @@ async function refreshStatus() {
   });
 }
 
+// ── resolution ───────────────────────────────────────────────────────────────
+async function setResolution(val) {
+  await api('/api/resolution', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ val })
+  });
+}
+
 // ── capture ──────────────────────────────────────────────────────────────────
 async function doCapture() {
   const btn  = document.getElementById('capture-btn');
@@ -518,9 +532,7 @@ async function doCapture() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      resolution: document.getElementById('sel-res').value,
-      quality:    document.getElementById('sel-qual').value,
-      method:     document.getElementById('sel-method').value,
+      save_parameters: document.getElementById('chk-save-params').checked,
     })
   });
 
@@ -618,14 +630,21 @@ def api_status():
     return jsonify(check_camera_status())
 
 
+@app.route("/api/resolution", methods=["POST"])
+@login_required
+def api_set_resolution():
+    body = request.get_json(silent=True) or {}
+    val  = body.get("val", "11")
+    ok, err = set_resolution(val)
+    return jsonify({"ok": ok, "error": err if not ok else ""})
+
+
 @app.route("/api/capture", methods=["POST"])
 @login_required
 def api_capture():
-    body       = request.get_json(silent=True) or {}
-    resolution = body.get("resolution", "UXGA")
-    quality    = body.get("quality",    "high")
-    method     = body.get("method",     "SIFT")
-    user_id    = session["user_id"]
+    body            = request.get_json(silent=True) or {}
+    save_parameters = bool(body.get("save_parameters", False))
+    user_id         = session["user_id"]
 
     # unique filename per user per timestamp
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -633,13 +652,13 @@ def api_capture():
     out_path = os.path.join(GALLERY_DIR, filename)
 
     # 1. fetch images from cameras
-    ok, err = sync_capture(resolution=resolution, quality=quality)
+    ok, err = sync_capture()
     if not ok:
         return jsonify({"ok": False, "error": err})
 
     # 2. stitch
     try:
-        stitch_images(input_images=["cam1.jpg", "cam2.jpg"], out_path=out_path)
+        stitch_images(input_images=["cam1.jpg", "cam2.jpg"], out_path=out_path, save_parameters=save_parameters)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
