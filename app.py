@@ -102,7 +102,7 @@ CSS = """
   .hdr-right a:hover { text-decoration: underline; }
 
   /* layout */
-  main { max-width: 860px; margin: 0 auto; padding: 2.5rem 2rem 4rem; }
+  main { max-width: 1200px; margin: 0 auto; padding: 2.5rem 2rem 4rem; }
 
   /* labels */
   .lbl {
@@ -221,10 +221,11 @@ CSS = """
              border: 0.5px dashed #e0ddd4; border-radius: 10px; }
 
   /* admin table */
-  .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13px;}
   .tbl th { text-align: left; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
-            color: #b0ad9f; padding: 8px 12px; border-bottom: 0.5px solid #e0ddd4; font-weight: 400; }
-  .tbl td { padding: 10px 12px; border-bottom: 0.5px solid #f0ede4; vertical-align: middle; }
+            color: #b0ad9f; padding: 8px 1.75rem; border-bottom: 0.5px solid #e0ddd4; font-weight: 400; }
+  .tbl td { padding: 10px 1.75rem; border-bottom: 0.5px solid #f0ede4; vertical-align: middle;}   
+  
   .tbl tr:last-child td { border-bottom: none; }
 
   /* helpers */
@@ -417,8 +418,8 @@ def admin_panel():
         </div>
       </div>
 
-      <div class="card">
-        <table class="tbl">
+      <div class="card" style="overflow:hidden; padding:0;">
+        <table class="tbl" style="width:100%">
           <thead>
             <tr>
               <th>Time</th>
