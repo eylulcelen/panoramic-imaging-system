@@ -1,5 +1,6 @@
 import cv2 as cv
 import numpy as np
+import imutils
 
 use_high_level_api = False
 
@@ -13,7 +14,7 @@ SEAM_MEGAPIX            = 0.1
 COMPOSE_MEGAPIX         = -1         # -1 = original resolution
 
 FEATURES                = 'orb'      # orb | sift | brisk | akaze
-MATCH_CONF              = 0.5       # None → 0.3 for orb, 0.65 otherwise
+MATCH_CONF              = 0.45       # None → 0.3 for orb, 0.65 otherwise
 CONF_THRESH             = 1.0
 
 MATCHER                 = 'homography'   # homography | affine
@@ -203,49 +204,35 @@ def setup(input_images):
         'seam_work_aspect':   seam_work_aspect,
     }
 
-
-def max_rect_in_hist(heights):
-    """Largest rectangle in a histogram via monotone stack. O(n).
-    Returns (area, left_col, right_col, bar_height)."""
-    stack = []  # (start_col, bar_height)
-    best_area = 0
-    best = (0, len(heights), 0)
-
-    for i in range(len(heights) + 1):
-        h = heights[i] if i < len(heights) else 0
-        left = i
-        while stack and stack[-1][1] > h:
-            sl, sh = stack.pop()
-            area = sh * (i - sl)
-            if area > best_area:
-                best_area = area
-                best = (sl, i, sh)
-            left = sl
-        stack.append((left, h))
-
-    return best_area, best[0], best[1], best[2]
-
 def crop_black_borders(img):
-    """Crop to the largest inscribed rectangle free of black borders."""
-    # int16 blender output has pixel values in [0, 255]; clip safely to uint8
-    tmp = np.clip(img, 0, 255).astype(np.uint8)
-    gray = cv.cvtColor(tmp, cv.COLOR_BGR2GRAY) if tmp.ndim == 3 else tmp
-    _, mask = cv.threshold(gray, 1, 1, cv.THRESH_BINARY)
+    img = cv.copyMakeBorder(img, 10, 10, 10, 10, cv.BORDER_CONSTANT, (0, 0, 0))
+    grayscale = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    thresh = cv.threshold(grayscale, 0, 255, cv.THRESH_BINARY)[1]
 
-    rows, cols = mask.shape
-    heights = np.zeros(cols, dtype=np.int32)
-    best_area = 0
-    best = (0, 0, cols, rows)  # x1, y1, x2, y2
+    contours = cv.findContours(thresh.copy(), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
+    area_of_interest = max(contours, key=cv.contourArea)
 
-    for r in range(rows):
-        heights = np.where(mask[r] == 1, heights + 1, 0)
-        area, x1, x2, h = max_rect_in_hist(heights)
-        if area > best_area:
-            best_area = area
-            best = (x1, r - h + 1, x2, r + 1)
+    mask = np.zeros(thresh.shape, dtype="uint8")
+    x, y, w, h = cv.boundingRect(area_of_interest)
+    cv.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
 
-    x1, y1, x2, y2 = best
-    return img[y1:y2, x1:x2]
+    # Fill black holes/noise inside the panorama region
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (7, 7))
+    thresh = cv.morphologyEx(thresh, cv.MORPH_CLOSE, kernel)
+
+    minimum_rectangle = mask.copy()
+    sub = mask.copy()
+    while cv.countNonZero(sub) > 0:
+        minimum_rectangle = cv.erode(minimum_rectangle, None)
+        sub = cv.subtract(minimum_rectangle, thresh)
+
+    contours = cv.findContours(minimum_rectangle.copy(), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
+    area_of_interest = max(contours, key=cv.contourArea)
+
+    x, y, w, h = cv.boundingRect(area_of_interest)
+    return img[y:y + h, x:x + w]
 
 # Phase 2 – Stitch
 # Warp → exposure compensation → seam finding → composite → blend → write.
@@ -351,7 +338,8 @@ def stitch(data, out_path):
         blender.feed(cv.UMat(img_warped_s), mask_warped, corners[idx])
 
     result, _ = blender.blend(None, None)
-    return result;
+    result = result.get() if hasattr(result, 'get') else np.array(result)
+    return np.clip(result, 0, 255).astype(np.uint8)
 
 
 def save_params(data, path):
@@ -414,7 +402,7 @@ def load_params(path):
     }
 
 
-def stitch_images(input_images, out_path, save_parameters = False):
+def stitch_images(input_images, out_path, save_parameters=False, crop_borders=False):
     if use_high_level_api:
         stitcher = cv.Stitcher.create(cv.STITCHER_PANORAMA)
         imgs = []
@@ -424,15 +412,17 @@ def stitch_images(input_images, out_path, save_parameters = False):
                 raise Exception("can't read image " + img_name)
             imgs.append(img)
         status, pano = stitcher.stitch(imgs)
-        cv.imwrite(out_path, crop_black_borders(pano))
+        result = crop_black_borders(pano) if crop_borders else pano
+        cv.imwrite(out_path, result)
     else:
         if not save_parameters:
             parameters = load_params(PARAMS_FILE)
         else:
             parameters = setup(input_images)
-            if save_parameters:
-                save_params(parameters, PARAMS_FILE)
-        cv.imwrite(out_path, crop_black_borders(stitch(parameters, out_path)))
+            save_params(parameters, PARAMS_FILE)
+        stitched = stitch(parameters, out_path)
+        result = crop_black_borders(stitched) if crop_borders else stitched
+        cv.imwrite(out_path, result)
 
 
 # Test

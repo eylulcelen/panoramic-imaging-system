@@ -4,11 +4,13 @@
 #include <WiFi.h>
 #include "board_config.h"
 #include "app_httpd.h"
-#define INITIAL_FRAMESIZE FRAMESIZE_HVGA
+#define INITIAL_FRAMESIZE FRAMESIZE_SVGA
 
 // ===========================
 // Enter your WiFi credentials
 // ===========================
+#define WIFI_SSID "Galaxy Note20 Ultra fa3b"
+#define WIFI_PASSWORD "xinq9872"
 #ifndef WIFI_SSID
 #error "WIFI_SSID not defined"
 #endif
@@ -43,7 +45,7 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 10000000;
-  config.frame_size = FRAMESIZE_HVGA;
+  config.frame_size = FRAMESIZE_SVGA;
   config.pixel_format = PIXFORMAT_JPEG;  // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;

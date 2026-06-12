@@ -10,15 +10,16 @@ User login:   http://localhost:5000/login
 
 import os
 import shutil
+import time
 from functools import wraps
 from datetime import datetime
 from flask import (Flask, render_template_string, send_file,
-                   jsonify, request, redirect, url_for, session)
+                   jsonify, request, redirect, url_for, session, g)
 
 from database import (init_db, verify_user, create_user, get_all_users,
                       delete_user, save_capture, get_user_captures,
-                      delete_capture, get_conn)
-from sync   import sync_capture, check_camera_status, set_resolution
+                      delete_capture, get_conn,log_analytics, get_analytics, get_chart_data)
+from sync   import sync_capture, check_camera_status
 from stitch import stitch_images
 
 # ── app config ───────────────────────────────────────────────────────────────
@@ -30,6 +31,35 @@ ADMIN_PASS  = "admin1234"
 
 os.makedirs(GALLERY_DIR, exist_ok=True)
 init_db()
+
+@app.before_request
+def start_timer():
+    g.start_time = time.time()
+
+@app.after_request
+def track_user_activity(response):
+    print("AFTER REQUEST FIRED:", request.path, session.get("user_id"))
+    if "user_id" not in session:
+        return response
+    if request.endpoint in ("static", None):
+        return response
+
+    duration = int((time.time() - getattr(g, "start_time", time.time())) * 1000)
+
+    details = getattr(g, "log_details", None)
+    error_msg = getattr(g, "error_msg", None)
+
+    log_analytics(
+        session["user_id"],
+        request.path,
+        request.method,
+        request.remote_addr,
+        response.status_code,
+        duration,
+        details,
+        error_msg
+    )
+    return response
 
 
 # ── auth decorators ───────────────────────────────────────────────────────────
@@ -130,26 +160,13 @@ CSS = """
   .refresh-btn:hover { background: #f0ede4; }
 
   /* settings grid */
-  .settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 1rem; }
+  .settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 2rem; }
   .setting-card  { background: #fff; border: 0.5px solid #e0ddd4; border-radius: 10px; padding: 12px 14px; }
   .setting-card label { display: block; font-size: 10.5px; letter-spacing: 0.1em;
                         text-transform: uppercase; color: #b0ad9f; margin-bottom: 6px; }
   .setting-card select { width: 100%; font-size: 13px; color: #1a1a18;
                          background: transparent; border: none; outline: none;
                          cursor: pointer; font-family: inherit; }
-
-  /* save params row */
-  .save-params-row {
-    display: flex; align-items: center; gap: 8px;
-    margin-bottom: 2rem; padding: 0 2px;
-  }
-  .save-params-row input[type="checkbox"] {
-    width: 14px; height: 14px; cursor: pointer; accent-color: #1a1a18; flex-shrink: 0;
-  }
-  .save-params-row label {
-    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
-    color: #b0ad9f; cursor: pointer; user-select: none;
-  }
 
   /* capture card */
   .capture-card {
@@ -312,6 +329,8 @@ def admin_logout():
 @admin_required
 def admin_panel():
     users = get_all_users()
+    logs = get_analytics()
+    chart_data = get_chart_data()
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT user_id, COUNT(*) as n FROM captures GROUP BY user_id"
@@ -320,7 +339,9 @@ def admin_panel():
     msg    = request.args.get("msg", "")
 
     html = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-    <title>Panoptic — Admin Panel</title>{{ css|safe }}</head><body>
+    <title>Panoptic — Admin Panel</title>{{ css|safe }}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    </head><body>
     <header>
       <div class="logo">PANOPTIC <span>/ admin panel</span></div>
       <div class="hdr-right">
@@ -384,8 +405,86 @@ def admin_panel():
           <p class="muted" style="font-size:13px">No users yet — create one above.</p>
         {% endif %}
       </div>
-    </main></body></html>"""
-    return render_template_string(html, css=CSS, users=users, counts=counts, msg=msg)
+
+      <span class="lbl mt2">analytics</span>
+      
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem;">
+        <div class="card" style="padding: 1rem;">
+          <canvas id="capturesChart"></canvas>
+        </div>
+        <div class="card" style="padding: 1rem;">
+          <canvas id="actionsChart"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Action</th>
+              <th>Duration</th>
+              <th>Details</th>
+              <th>Status/Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for log in logs %}
+            <tr>
+              <td>{{ log.timestamp }}</td>
+              <td>{{ log.username or log.user_id }}</td>
+              <td>{{ log.action }}</td>
+              <td>{{ log.duration_ms }} ms</td>
+              <td><small class="muted">{{ log.details or '-' }}</small></td>
+              <td>
+                {% if log.error_msg %}
+                  <span style="color:#A32D2D; font-size:11px; padding:2px 6px; border:0.5px solid #F7C1C1; background:#FCEBEB; border-radius:4px;">Error: {{ log.error_msg }}</span>
+                {% elif log.status_code >= 400 %}
+                  <span style="color:#A32D2D; font-size:11px;">HTTP {{ log.status_code }}</span>
+                {% else %}
+                  <span style="color:#3B6D11; font-size:11px;">OK ({{ log.status_code }})</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+         </table>
+      </div>
+    </main>
+    <script>
+    const chartData = {{ chart_data|tojson|safe }};
+    if (chartData.dates && chartData.dates.length > 0) {
+      new Chart(document.getElementById('capturesChart'), {
+        type: 'bar',
+        data: {
+          labels: chartData.dates,
+          datasets: [{
+            label: 'Successful Captures',
+            data: chartData.capture_counts,
+            backgroundColor: '#1a1a18',
+            borderRadius: 4
+          }]
+        },
+        options: { responsive: true, plugins: { legend: {display: false}, title: { display: true, text: 'Recent Captures' } } }
+      });
+    }
+    if (chartData.action_labels && chartData.action_labels.length > 0) {
+      new Chart(document.getElementById('actionsChart'), {
+        type: 'doughnut',
+        data: {
+          labels: chartData.action_labels,
+          datasets: [{
+            data: chartData.action_counts,
+            backgroundColor: ['#185FA5', '#3B6D11', '#A32D2D', '#e0ddd4', '#b0ad9f']
+          }]
+        },
+        options: { responsive: true, plugins: { title: { display: true, text: 'Top User Actions' } } }
+      });
+    }
+    </script>
+    </body></html>"""
+    return render_template_string(html, css=CSS, users=users, counts=counts, logs=logs, chart_data=chart_data, msg=msg)
 
 
 @app.route("/admin/create-user", methods=["POST"])
@@ -400,7 +499,6 @@ def admin_create_user():
 def admin_delete_user():
     ok, msg = delete_user(int(request.form["user_id"]))
     return redirect(url_for("admin_panel", msg=msg))
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN APP
@@ -436,22 +534,16 @@ MAIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   <!-- Settings -->
   <span class="lbl">capture settings</span>
   <div class="settings-grid">
-    <div class="setting-card">
-      <label for="sel-res">Resolution</label>
-      <select id="sel-res" onchange="setResolution(this.value)">
-        <option value="11">800 × 600 (SVGA)</option>
-        <option value="10">640 × 480 (VGA)</option>
-        <option value="9">480 × 320 (HVGA)</option>
-      </select>
-    </div>
-          <!-- Save parameters checkbox -->
-      <div class="save-params-row">
+    <div class="save-params-row">
         <input type="checkbox" id="chk-save-params">
-        <label for="chk-save-params">Save stitch parameters</label>
-      </div>
+        <label for="chk-save-params">Recalibrate and save stitch parameters</label>
+    </div>
+    
+    <div class="crop-borders-row">
+        <input type="checkbox" id="chk-crop-borders">
+        <label for="chk-crop-borders">Crop borders</label>
+    </div>
   </div>
-
-
 
   <!-- Capture -->
   <span class="lbl">capture</span>
@@ -491,15 +583,6 @@ async function refreshStatus() {
   });
 }
 
-// ── resolution ───────────────────────────────────────────────────────────────
-async function setResolution(val) {
-  await api('/api/resolution', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ val })
-  });
-}
-
 // ── capture ──────────────────────────────────────────────────────────────────
 async function doCapture() {
   const btn  = document.getElementById('capture-btn');
@@ -533,6 +616,7 @@ async function doCapture() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       save_parameters: document.getElementById('chk-save-params').checked,
+      crop_borders: document.getElementById('chk-crop-borders').checked,
     })
   });
 
@@ -630,21 +714,16 @@ def api_status():
     return jsonify(check_camera_status())
 
 
-@app.route("/api/resolution", methods=["POST"])
-@login_required
-def api_set_resolution():
-    body = request.get_json(silent=True) or {}
-    val  = body.get("val", "11")
-    ok, err = set_resolution(val)
-    return jsonify({"ok": ok, "error": err if not ok else ""})
-
-
 @app.route("/api/capture", methods=["POST"])
 @login_required
 def api_capture():
-    body            = request.get_json(silent=True) or {}
+    body       = request.get_json(silent=True) or {}
     save_parameters = bool(body.get("save_parameters", False))
-    user_id         = session["user_id"]
+    crop_borders = bool(body.get("crop_borders", False))
+    print(f"save_parameters: {save_parameters} crop_borders: {crop_borders}")
+    user_id    = session["user_id"]
+
+    g.log_details = f"Recalibrate:{save_parameters}, Crop borders{crop_borders}"
 
     # unique filename per user per timestamp
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -654,12 +733,19 @@ def api_capture():
     # 1. fetch images from cameras
     ok, err = sync_capture()
     if not ok:
+        g.error_msg = err
         return jsonify({"ok": False, "error": err})
 
     # 2. stitch
     try:
-        stitch_images(input_images=["cam1.jpg", "cam2.jpg"], out_path=out_path, save_parameters=save_parameters)
+        stitch_images(
+            input_images=["cam1.jpg", "cam2.jpg"],
+            out_path=out_path,
+            save_parameters=save_parameters,
+            crop_borders=crop_borders
+            )
     except Exception as e:
+        g.error_msg = str(e)
         return jsonify({"ok": False, "error": str(e)})
 
     # 3. copy as "latest" for the preview endpoint
@@ -714,4 +800,4 @@ def serve_capture(filename):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)

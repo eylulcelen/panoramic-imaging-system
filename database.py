@@ -4,6 +4,7 @@ database.py — SQLite setup and helper functions.
 Tables:
   users    (id, username, password_hash, created_at)
   captures (id, user_id, filename, date, size_bytes)
+  log_analytics (user_id, path, method, ip, status_code, duration_ms)
 """
 
 import sqlite3
@@ -49,7 +50,26 @@ def init_db():
                 date       TEXT    NOT NULL,
                 size_bytes INTEGER NOT NULL
             );
+                           
+            CREATE TABLE IF NOT EXISTS log_analytics (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER,
+                path        TEXT,
+                method      TEXT,
+                timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                ip          TEXT,
+                status_code INTEGER,
+                duration_ms INTEGER
+            );
         """)
+        try:
+            conn.execute("ALTER TABLE log_analytics ADD COLUMN details TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE log_analytics ADD COLUMN error_msg TEXT")
+        except sqlite3.OperationalError:
+            pass
     print("[db] Database ready →", DB_PATH)
 
 
@@ -107,8 +127,9 @@ def delete_user(user_id: int) -> tuple[bool, str]:
             path = os.path.join(GALLERY_DIR, r["filename"])
             if os.path.exists(path):
                 os.remove(path)
-        conn.execute("DELETE FROM captures WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM users    WHERE id      = ?", (user_id,))
+        conn.execute("DELETE FROM captures     WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM log_analytics WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users        WHERE id      = ?", (user_id,))
     return True, "User deleted."
 
 
@@ -147,3 +168,85 @@ def delete_capture(capture_id: int, user_id: int) -> tuple[bool, str]:
             os.remove(path)
         conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
     return True, "Capture deleted."
+
+# ─────────────────────────────────────────────
+#  Analytics helpers
+# ─────────────────────────────────────────────
+
+def log_analytics(user_id, path, method, ip, status_code, duration_ms, details=None, error_msg=None):
+    try:
+        if user_id is None:
+            return
+
+        with get_conn() as conn:
+            conn.execute("""
+                INSERT INTO log_analytics
+                (user_id, path, method, ip, status_code, duration_ms, details, error_msg)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, path, method, ip, status_code, duration_ms, details, error_msg))
+
+    except Exception as e:
+        print("LOG ERROR:", e)
+        
+def get_analytics():
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT
+                 l.timestamp,
+                 l.user_id,
+                 u.username,
+                 l.path,
+                 l.method,
+                 l.status_code, 
+                 l.duration_ms,
+                 l.details,
+                 l.error_msg,
+                CASE
+                    WHEN path = '/' THEN 'Dashboard Open'
+                    WHEN path = '/login' THEN 'Login Attempt'
+                    WHEN path = '/api/capture' THEN 'Capture Panorama'
+                    WHEN path = '/api/gallery' THEN 'Gallery Open'
+                    WHEN path = '/api/status' THEN 'Camera Status Check'
+                    WHEN path = '/logout' THEN 'Logout'
+                    ELSE path
+                END as action
+            FROM log_analytics l
+            LEFT JOIN users u ON l.user_id = u.id
+            ORDER BY l.timestamp DESC
+        """).fetchall()
+
+def get_chart_data():
+    with get_conn() as conn:
+        captures_by_day = conn.execute("""
+            SELECT date(timestamp) as d, COUNT(*) as c 
+            FROM log_analytics 
+            WHERE path = '/api/capture' AND error_msg IS NULL 
+            GROUP BY d 
+            ORDER BY d ASC 
+            LIMIT 7
+        """).fetchall()
+
+        top_actions = conn.execute("""
+            SELECT 
+                CASE
+                    WHEN path = '/' THEN 'Dashboard'
+                    WHEN path = '/login' THEN 'Login'
+                    WHEN path = '/api/capture' THEN 'Capture'
+                    WHEN path = '/api/gallery' THEN 'Gallery'
+                    WHEN path = '/api/status' THEN 'Camera Check'
+                    WHEN path = '/logout' THEN 'Logout'
+                    ELSE path
+                END as action,
+                COUNT(*) as c 
+            FROM log_analytics 
+            GROUP BY action 
+            ORDER BY c DESC 
+            LIMIT 5
+        """).fetchall()
+
+        return {
+            "dates": [row["d"] for row in captures_by_day],
+            "capture_counts": [row["c"] for row in captures_by_day],
+            "action_labels": [row["action"] for row in top_actions],
+            "action_counts": [row["c"] for row in top_actions]
+        }
